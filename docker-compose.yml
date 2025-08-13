@@ -1,174 +1,461 @@
-version: '3.8'
+version: "3.9"
 
-services:
-  # Core Infrastructure
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.4.0
-    hostname: zookeeper
-    container_name: baheka-zookeeper
-    ports:
-      - "2181:2181"
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    volumes:
-      - zookeeper-data:/var/lib/zookeeper/data
-      - zookeeper-logs:/var/lib/zookeeper/log
+x-env: &common-env
+  TZ: Africa/Johannesburg
+  JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=60 -XX:+UseSerialGC"
+  OTEL_TRACES_SAMPLER: "parentbased_always_off"
 
-  kafka:
-    image: confluentinc/cp-kafka:7.4.0
-    hostname: kafka
-    container_name: baheka-kafka
-    depends_on:
-      - zookeeper
-    ports:
-      - "9092:9092"
-      - "9094:9094"
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
-    volumes:
-      - kafka-data:/var/lib/kafka/data
-
-  schema-registry:
-    image: confluentinc/cp-schema-registry:7.4.0
-    hostname: schema-registry
-    container_name: baheka-schema-registry
-    depends_on:
-      - kafka
-    ports:
-      - "8081:8081"
-    environment:
-      SCHEMA_REGISTRY_HOST_NAME: schema-registry
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'kafka:29092'
-      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
-
-  # Databases
-  postgres:
-    image: timescale/timescaledb:latest-pg15
-    container_name: baheka-postgres
-    restart: always
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_DB: baheka_sentinel
-      POSTGRES_USER: baheka_user
-      POSTGRES_PASSWORD: baheka_password
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
-
-  redis:
-    image: redis:7-alpine
-    container_name: baheka-redis
-    restart: always
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
-    container_name: baheka-elasticsearch
-    restart: always
-    ports:
-      - "9200:9200"
-      - "9300:9300"
-    environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
-    volumes:
-      - elasticsearch-data:/usr/share/elasticsearch/data
-
-  # Security & Identity
-  keycloak:
-    image: quay.io/keycloak/keycloak:22.0
-    container_name: baheka-keycloak
-    restart: always
-    ports:
-      - "8080:8080"
-    environment:
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin123
-      KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://postgres:5432/baheka_sentinel
-      KC_DB_USERNAME: baheka_user
-      KC_DB_PASSWORD: baheka_password
-      KC_HOSTNAME: localhost
-    command: start-dev
-    depends_on:
-      - postgres
-
-  vault:
-    image: hashicorp/vault:1.14
-    container_name: baheka-vault
-    restart: always
-    ports:
-      - "8200:8200"
-    environment:
-      VAULT_DEV_ROOT_TOKEN_ID: baheka-vault-token
-      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
-    cap_add:
-      - IPC_LOCK
-    volumes:
-      - vault-data:/vault/data
-
-  # Monitoring & Observability
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: baheka-prometheus
-    restart: always
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus-data:/prometheus
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: baheka-grafana
-    restart: always
-    ports:
-      - "3000:3000"
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin123
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./monitoring/grafana:/etc/grafana/provisioning
-
-  # Message Queue UI
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    container_name: baheka-kafka-ui
-    restart: always
-    ports:
-      - "8082:8080"
-    environment:
-      KAFKA_CLUSTERS_0_NAME: baheka-cluster
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
-      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
-    depends_on:
-      - kafka
-      - schema-registry
-
-volumes:
-  zookeeper-data:
-  zookeeper-logs:
-  kafka-data:
-  postgres-data:
-  redis-data:
-  elasticsearch-data:
-  vault-data:
-  prometheus-data:
-  grafana-data:
+x-logging: &logcap
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 networks:
-  default:
-    name: baheka-network
+  baheka-network:
+    driver: bridge
+
+volumes:
+  pgdata:
+  keycloak-data:
+  opa-data:
+
+services:
+  # ===============================================
+  # CORE PROFILE (always on - lightweight dev setup)
+  # ===============================================
+  
+  # API Gateway + Backend Services
+  api:
+    profiles: ["core"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: sentinel-gateway
+    image: baheka/sentinel-api:dev
+    container_name: baheka-api
+    environment:
+      <<: *common-env
+      SPRING_PROFILES_ACTIVE: "dev"
+      SPRING_DATASOURCE_URL: "jdbc:postgresql://db:5432/sentinel"
+      SPRING_DATASOURCE_USERNAME: "sentinel"
+      SPRING_DATASOURCE_PASSWORD: "sentinel"
+      KEYCLOAK_ISSUER: "http://keycloak:8080/realms/baheka-sentinel"
+      OPA_URL: "http://opa:8181"
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+    depends_on:
+      db:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      opa:
+        condition: service_started
+    ports: 
+      - "8080:8080"
+    deploy:
+      resources:
+        limits: 
+          memory: 768M
+          cpus: "0.70"
+        reservations: 
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  # React Frontend
+  ui:
+    profiles: ["core"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: baheka/sentinel-ui:dev
+    container_name: baheka-ui
+    environment:
+      NODE_OPTIONS: "--max-old-space-size=256"
+      REACT_APP_API_URL: "http://localhost:8080"
+      REACT_APP_KEYCLOAK_URL: "http://localhost:8080"
+    ports: 
+      - "3000:3000"
+    deploy:
+      resources:
+        limits: 
+          memory: 256M
+          cpus: "0.30"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000 || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  # PostgreSQL Database
+  db:
+    profiles: ["core"]
+    image: postgres:16-alpine
+    container_name: baheka-db
+    environment:
+      POSTGRES_DB: sentinel
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel
+      PGDATA: /var/lib/postgresql/data/pgdata
+    command: >
+      postgres
+      -c shared_buffers=128MB
+      -c max_connections=50
+      -c wal_level=minimal
+      -c checkpoint_completion_target=0.9
+      -c effective_cache_size=256MB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports: 
+      - "5432:5432"
+    deploy:
+      resources:
+        limits: 
+          memory: 512M
+          cpus: "0.40"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  # Keycloak Identity Management (dev mode)
+  keycloak:
+    profiles: ["core"]
+    image: quay.io/keycloak/keycloak:25.0
+    container_name: baheka-keycloak
+    command: start-dev --http-port=8080
+    environment:
+      KC_DB: dev-mem
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin123
+      KC_HOSTNAME: localhost
+      KC_HTTP_ENABLED: true
+      JAVA_OPTS: "-XX:MaxRAMPercentage=60 -XX:+UseSerialGC"
+    ports: 
+      - "8081:8080"
+    deploy:
+      resources:
+        limits: 
+          memory: 512M
+          cpus: "0.40"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  # Open Policy Agent
+  opa:
+    profiles: ["core"]
+    image: openpolicyagent/opa:0.66.0-rootless
+    container_name: baheka-opa
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "/policies"]
+    volumes:
+      - ./policies:/policies:ro
+      - opa-data:/data
+    ports: 
+      - "8181:8181"
+    deploy:
+      resources:
+        limits: 
+          memory: 128M
+          cpus: "0.20"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8181/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  # Redis Cache
+  redis:
+    profiles: ["core"]
+    image: redis:7-alpine
+    container_name: baheka-redis
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    deploy:
+      resources:
+        limits: 
+          memory: 128M
+          cpus: "0.20"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  # ===============================================
+  # STREAMING PROFILE (opt-in - Kafka alternative)
+  # ===============================================
+  
+  # Redpanda (Kafka-compatible, single node)
+  redpanda:
+    profiles: ["stream"]
+    image: redpandadata/redpanda:v24.1.6
+    container_name: baheka-redpanda
+    command: >
+      redpanda start 
+      --overprovisioned 
+      --smp 1 
+      --memory 512M 
+      --reserve-memory 0M
+      --check=false
+      --node-id 0
+      --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      --pandaproxy-addr 0.0.0.0:8082
+      --advertise-pandaproxy-addr localhost:8082
+      --set redpanda.auto_create_topics_enabled=true
+      --set redpanda.enable_transactions=true
+      --set redpanda.enable_idempotence=true
+    ports: 
+      - "9092:9092"
+      - "8082:8082"
+      - "9644:9644"
+    deploy:
+      resources:
+        limits: 
+          memory: 512M
+          cpus: "0.50"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health --brokers=localhost:9092"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  # Redpanda Console (Kafka UI)
+  redpanda-console:
+    profiles: ["stream"]
+    image: redpandadata/console:v2.4.6
+    container_name: baheka-kafka-ui
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+      REDPANDA_ADMIN_API_ENABLED: true
+      REDPANDA_ADMIN_API_URLS: http://redpanda:9644
+    ports:
+      - "8083:8080"
+    depends_on:
+      - redpanda
+    deploy:
+      resources:
+        limits: 
+          memory: 256M
+          cpus: "0.20"
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  # ===============================================
+  # SEARCH PROFILE (opt-in - OpenSearch)
+  # ===============================================
+  
+  opensearch:
+    profiles: ["search"]
+    image: opensearchproject/opensearch:2.13.0
+    container_name: baheka-opensearch
+    environment:
+      discovery.type: single-node
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms256m -Xmx256m"
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports: 
+      - "9200:9200"
+      - "9300:9300"
+    deploy:
+      resources:
+        limits: 
+          memory: 512M
+          cpus: "0.60"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  # OpenSearch Dashboards
+  opensearch-dashboards:
+    profiles: ["search"]
+    image: opensearchproject/opensearch-dashboards:2.13.0
+    container_name: baheka-opensearch-dashboards
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports:
+      - "5601:5601"
+    depends_on:
+      - opensearch
+    deploy:
+      resources:
+        limits: 
+          memory: 512M
+          cpus: "0.40"
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  # ===============================================
+  # WORKFLOW PROFILE (opt-in - Camunda/Zeebe)
+  # ===============================================
+  
+  zeebe:
+    profiles: ["workflow"]
+    image: camunda/zeebe:8.5.2
+    container_name: baheka-zeebe
+    environment:
+      ZEEBE_BROKER_GATEWAY_ENABLE: "true"
+      ZEEBE_BROKER_EXPORTERS_ELASTICSEARCH_CLASSNAME: "io.camunda.zeebe.exporter.ElasticsearchExporter"
+      ZEEBE_BROKER_EXPORTERS_ELASTICSEARCH_ARGS_URL: "http://opensearch:9200"
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=50 -XX:+UseSerialGC"
+    ports: 
+      - "26500:26500"
+      - "9600:9600"
+    deploy:
+      resources:
+        limits: 
+          memory: 512M
+          cpus: "0.40"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 10s bash -c ':> /dev/tcp/127.0.0.1/26500' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  # Camunda Operate
+  operate:
+    profiles: ["workflow"]
+    image: camunda/operate:8.5.2
+    container_name: baheka-operate
+    environment:
+      CAMUNDA_OPERATE_ZEEBE_GATEWAYADDRESS: "zeebe:26500"
+      CAMUNDA_OPERATE_ELASTICSEARCH_URL: "http://opensearch:9200"
+      CAMUNDA_OPERATE_ZEEBEELASTICSEARCH_URL: "http://opensearch:9200"
+    ports:
+      - "8084:8080"
+    depends_on:
+      - zeebe
+    deploy:
+      resources:
+        limits: 
+          memory: 512M
+          cpus: "0.30"
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  # ===============================================
+  # MONITORING PROFILE (opt-in - observability)
+  # ===============================================
+
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:v2.48.1
+    container_name: baheka-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=7d'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    deploy:
+      resources:
+        limits: 
+          memory: 256M
+          cpus: "0.30"
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana:10.2.3
+    container_name: baheka-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: "grafana-piechart-panel"
+    volumes:
+      - ./monitoring/grafana:/etc/grafana/provisioning:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits: 
+          memory: 256M
+          cpus: "0.20"
+    logging: *logcap
+    networks:
+      - baheka-network
+
+  # ===============================================
+  # SANDBOX PROFILE (opt-in - external API mocking)
+  # ===============================================
+  
+  wiremock:
+    profiles: ["sandbox"]
+    image: wiremock/wiremock:3.9.1
+    container_name: baheka-wiremock
+    command: ["--verbose", "--port=8089", "--global-response-templating"]
+    volumes:
+      - ./sandbox/wiremock:/home/wiremock:ro
+    ports: 
+      - "8089:8089"
+    deploy:
+      resources:
+        limits: 
+          memory: 128M
+          cpus: "0.10"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8089/__admin/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging: *logcap
+    networks:
+      - baheka-network

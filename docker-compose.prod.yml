@@ -1,0 +1,601 @@
+version: '3.8'
+
+# Production-ready Docker Compose for Baheka Sentinel
+# This configuration includes all services with production optimizations
+
+services:
+  # === INFRASTRUCTURE SERVICES ===
+  
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    hostname: zookeeper
+    container_name: baheka-zookeeper
+    restart: unless-stopped
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_INIT_LIMIT: 5
+      ZOOKEEPER_SYNC_LIMIT: 2
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo 'ruok' | nc localhost 2181"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - baheka-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    hostname: kafka
+    container_name: baheka-kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "9094:9094"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_JMX_PORT: 9997
+      KAFKA_JMX_OPTS: -Dcom.sun.management.jmxremote -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false -Djava.rmi.server.hostname=kafka -Dcom.sun.management.jmxremote.rmi.port=9997
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - baheka-network
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.4.0
+    hostname: schema-registry
+    container_name: baheka-schema-registry
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'kafka:29092'
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS: 10000
+      SCHEMA_REGISTRY_DEBUG: 'false'
+    volumes:
+      - schema-registry-data:/etc/schema-registry/secrets
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - baheka-network
+
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: baheka-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: baheka_sentinel
+      POSTGRES_USER: baheka_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-baheka_secure_password_2024}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+      - ./backup:/backup
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=4MB
+      -c min_wal_size=1GB
+      -c max_wal_size=4GB
+      -c log_statement=all
+      -c log_duration=on
+      -c log_min_duration_statement=1000
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U baheka_user -d baheka_sentinel"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - baheka-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: baheka-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --appendonly yes
+      --appendfsync everysec
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - baheka-network
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
+    container_name: baheka-elasticsearch
+    restart: unless-stopped
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - baheka-network
+
+  # === SECURITY & IDENTITY SERVICES ===
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:22.0
+    container_name: baheka-keycloak
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin_secure_2024}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/baheka_sentinel
+      KC_DB_USERNAME: baheka_user
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-baheka_secure_password_2024}
+      KC_HOSTNAME: ${KEYCLOAK_HOSTNAME:-localhost}
+      KC_HTTP_ENABLED: true
+      KC_PROXY: edge
+      KC_LOG_LEVEL: INFO
+    command: start --optimized
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - baheka-network
+
+  vault:
+    image: hashicorp/vault:1.14
+    container_name: baheka-vault
+    restart: unless-stopped
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_ROOT_TOKEN:-baheka_vault_token_2024}
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      VAULT_API_ADDR: http://0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - vault-data:/vault/data
+      - vault-config:/vault/config
+    healthcheck:
+      test: ["CMD-SHELL", "vault status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - baheka-network
+
+  # === MONITORING SERVICES ===
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: baheka-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:9090/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - baheka-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: baheka-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin_secure_2024}
+      GF_SECURITY_ADMIN_USER: admin
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+      GF_SERVER_ROOT_URL: http://localhost:3001
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - baheka-network
+
+  # === BAHEKA SENTINEL SERVICES ===
+
+  sentinel-gateway:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: sentinel-gateway
+    image: baheka/sentinel-gateway:${VERSION:-1.0.0}
+    container_name: sentinel-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/baheka_sentinel
+      SPRING_DATASOURCE_USERNAME: baheka_user
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-baheka_secure_password_2024}
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,info,metrics,prometheus
+      JAVA_OPTS: -Xmx512m -Xms256m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - baheka-network
+
+  sentinel-risk:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: sentinel-risk
+    image: baheka/sentinel-risk:${VERSION:-1.0.0}
+    container_name: sentinel-risk
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/baheka_sentinel
+      SPRING_DATASOURCE_USERNAME: baheka_user
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-baheka_secure_password_2024}
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SERVER_PORT: 8081
+      JAVA_OPTS: -Xmx1g -Xms512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - baheka-network
+
+  sentinel-aml:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: sentinel-aml
+    image: baheka/sentinel-aml:${VERSION:-1.0.0}
+    container_name: sentinel-aml
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/baheka_sentinel
+      SPRING_DATASOURCE_USERNAME: baheka_user
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-baheka_secure_password_2024}
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
+      SERVER_PORT: 8082
+      JAVA_OPTS: -Xmx1g -Xms512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - baheka-network
+
+  sentinel-compliance:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: sentinel-compliance
+    image: baheka/sentinel-compliance:${VERSION:-1.0.0}
+    container_name: sentinel-compliance
+    restart: unless-stopped
+    ports:
+      - "8083:8083"
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/baheka_sentinel
+      SPRING_DATASOURCE_USERNAME: baheka_user
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-baheka_secure_password_2024}
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
+      SERVER_PORT: 8083
+      JAVA_OPTS: -Xmx1g -Xms512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8083/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - baheka-network
+
+  sentinel-security:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: sentinel-security
+    image: baheka/sentinel-security:${VERSION:-1.0.0}
+    container_name: sentinel-security
+    restart: unless-stopped
+    ports:
+      - "8084:8084"
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/baheka_sentinel
+      SPRING_DATASOURCE_USERNAME: baheka_user
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-baheka_secure_password_2024}
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
+      SERVER_PORT: 8084
+      JAVA_OPTS: -Xmx1g -Xms512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8084/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - baheka-network
+
+  sentinel-notification:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: sentinel-notification
+    image: baheka/sentinel-notification:${VERSION:-1.0.0}
+    container_name: sentinel-notification
+    restart: unless-stopped
+    ports:
+      - "8085:8085"
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/baheka_sentinel
+      SPRING_DATASOURCE_USERNAME: baheka_user
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-baheka_secure_password_2024}
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
+      SERVER_PORT: 8085
+      JAVA_OPTS: -Xmx1g -Xms512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8085/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - baheka-network
+
+  sentinel-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: baheka/sentinel-frontend:${VERSION:-1.0.0}
+    container_name: sentinel-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      API_URL: http://sentinel-gateway:8080
+      APP_ENV: production
+    depends_on:
+      - sentinel-gateway
+    volumes:
+      - ./logs/nginx:/var/log/nginx
+    networks:
+      - baheka-network
+
+  # === UTILITY SERVICES ===
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: baheka-kafka-ui
+    restart: unless-stopped
+    ports:
+      - "8086:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: baheka-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    networks:
+      - baheka-network
+
+# === VOLUMES ===
+volumes:
+  zookeeper-data:
+    driver: local
+  zookeeper-logs:
+    driver: local
+  kafka-data:
+    driver: local
+  schema-registry-data:
+    driver: local
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  elasticsearch-data:
+    driver: local
+  keycloak-data:
+    driver: local
+  vault-data:
+    driver: local
+  vault-config:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+# === NETWORKS ===
+networks:
+  baheka-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

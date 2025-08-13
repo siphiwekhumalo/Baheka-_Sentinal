@@ -1,0 +1,38 @@
+{
+  "request": {
+    "method": "POST",
+    "url": "/kyc/verify",
+    "headers": {
+      "Content-Type": {
+        "equalTo": "application/json"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "verificationId": "{{randomValue type='UUID'}}",
+      "status": "VERIFIED",
+      "score": 0.88,
+      "checks": {
+        "identity": {
+          "status": "PASS",
+          "documents": ["PASSPORT", "DRIVERS_LICENSE"]
+        },
+        "address": {
+          "status": "PASS",
+          "confidence": 0.92
+        },
+        "creditCheck": {
+          "status": "PASS",
+          "score": 720
+        }
+      },
+      "riskLevel": "LOW",
+      "timestamp": "{{now format='yyyy-MM-dd'T'HH:mm:ss'Z'}}"
+    }
+  }
+}

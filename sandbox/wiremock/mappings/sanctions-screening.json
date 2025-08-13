@@ -1,0 +1,35 @@
+{
+  "request": {
+    "method": "POST",
+    "url": "/sanctions/screen",
+    "headers": {
+      "Content-Type": {
+        "equalTo": "application/json"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "screeningId": "{{randomValue type='UUID'}}",
+      "status": "COMPLETED",
+      "matches": [
+        {
+          "matchId": "{{randomValue type='UUID'}}",
+          "confidence": 0.95,
+          "entity": {
+            "name": "John Doe",
+            "type": "PERSON",
+            "country": "US"
+          },
+          "list": "OFAC_SDN",
+          "reason": "Name match with high confidence"
+        }
+      ],
+      "timestamp": "{{now format='yyyy-MM-dd'T'HH:mm:ss'Z'}}"
+    }
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "request": {
+    "method": "GET",
+    "url": "/pep/search",
+    "queryParameters": {
+      "name": {
+        "matches": ".*"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "searchId": "{{randomValue type='UUID'}}",
+      "query": "{{request.query.name}}",
+      "results": [
+        {
+          "id": "PEP_{{randomValue type='ALPHANUMERIC' length=8}}",
+          "name": "{{request.query.name}}",
+          "category": "HEAD_OF_STATE",
+          "country": "{{randomValue type='ALPHABETIC' length=2 uppercase=true}}",
+          "riskLevel": "HIGH",
+          "lastUpdated": "{{now format='yyyy-MM-dd'}}",
+          "sources": ["WORLD_CHECK", "PEP_DATABASE"]
+        }
+      ],
+      "totalResults": 1,
+      "timestamp": "{{now format='yyyy-MM-dd'T'HH:mm:ss'Z'}}"
+    }
+  }
+}

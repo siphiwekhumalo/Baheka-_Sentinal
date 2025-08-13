@@ -4,85 +4,126 @@
 
 ### Prerequisites
 - Docker & Docker Compose
-- Java 17+
-- Node.js 18+
+- Make (recommended)
+- 4GB+ RAM available for Docker
 - Git
 
-### 1. Start Infrastructure Services
+### 1. Clone and Start Core Services (Recommended)
 ```bash
-# Start all infrastructure (Kafka, PostgreSQL, Redis, etc.)
-docker-compose up -d
+# Clone the repository
+git clone <repository-url>
+cd baheka-sentinel
 
-# Wait for services to be ready (about 2-3 minutes)
-./scripts/start-services.sh
+# Start lightweight core services (~2GB RAM)
+make up
+
+# OR without Make:
+docker compose --profile core up -d
 ```
 
-### 2. Install Frontend Dependencies
+### 2. Verify Services
 ```bash
-cd frontend
-npm install
+# Check service status
+make status
+
+# Check health
+make health
+
+# View all available URLs
+make urls
 ```
 
-### 3. Start Backend Services
+### 3. Access the Platform
 ```bash
-# Each service runs on different ports:
-# Gateway: 8080
-# Risk: 8081
-# AML: 8082
-# Compliance: 8083
-# Security: 8084
-# Notification: 8085
+# Open dashboard in browser
+open http://localhost:3000
 
-cd backend
-./gradlew :services:sentinel-gateway:bootRun &
-./gradlew :services:sentinel-risk:bootRun &
-./gradlew :services:sentinel-aml:bootRun &
-```
+# API Gateway
+curl http://localhost:8080/actuator/health
 
-### 4. Start Frontend
-```bash
-cd frontend
-npm start
+# Keycloak Admin Console
+open http://localhost:8081
 ```
 
 ## 📊 Service URLs
 
-| Service | URL | Description |
-|---------|-----|-------------|
-| Frontend | http://localhost:3000 | React Dashboard |
-| API Gateway | http://localhost:8080 | Main API Entry |
-| Risk Service | http://localhost:8081 | Risk Management |
-| AML Service | http://localhost:8082 | AML Monitoring |
-| Keycloak | http://localhost:8080/auth | Identity Management |
-| Kafka UI | http://localhost:8082 | Message Queue Management |
-| Grafana | http://localhost:3000 | Monitoring Dashboard |
-| Prometheus | http://localhost:9090 | Metrics Collection |
+| Service | URL | Profile | Credentials |
+|---------|-----|---------|-------------|
+| **Dashboard** | http://localhost:3000 | `core` | Auto-login |
+| **API Gateway** | http://localhost:8080 | `core` | JWT required |
+| **Keycloak Admin** | http://localhost:8081 | `core` | admin/admin123 |
+| **Database** | localhost:5432 | `core` | sentinel/sentinel |
+| **Kafka UI** | http://localhost:8083 | `stream` | No auth |
+| **Search** | http://localhost:9200 | `search` | No auth |
+| **WireMock** | http://localhost:8089 | `sandbox` | No auth |
+| **Grafana** | http://localhost:3001 | `monitoring` | admin/admin123 |
 
-## 🔐 Default Credentials
+## 🔧 Profile-Based Development
 
-| Service | Username | Password |
-|---------|----------|----------|
-| Keycloak Admin | admin | admin123 |
-| Grafana | admin | admin123 |
-| PostgreSQL | baheka_user | baheka_password |
+### Core Profile (Always Start Here)
+```bash
+make up
+# Services: API, UI, Database, Authentication, Cache
+# RAM: ~2GB
+# Use for: Basic development, UI work, API testing
+```
+
+### Add Streaming for AML Work
+```bash
+make stream
+# Additional: Redpanda (Kafka), Kafka UI
+# RAM: +512MB
+# Use for: Event processing, transaction monitoring
+```
+
+### Add Search for Analytics
+```bash
+make search  
+# Additional: OpenSearch, Dashboards
+# RAM: +512MB
+# Use for: Log analysis, search features, dashboards
+```
+
+### Add Workflow Engine
+```bash
+make workflow
+# Additional: Zeebe, Camunda Operate
+# RAM: +512MB  
+# Use for: Business process automation, approval workflows
+```
+
+### Add Monitoring Stack
+```bash
+make monitoring
+# Additional: Prometheus, Grafana
+# RAM: +256MB
+# Use for: Performance testing, metrics collection
+```
+
+### Add External API Mocking
+```bash
+make sandbox
+# Additional: WireMock
+# RAM: +128MB
+# Use for: Development without external dependencies
+```
 
 ## 🏗️ Architecture Overview
 
 ### Microservices
-- **API Gateway** - Routes and load balancing
-- **Risk Service** - Credit risk, VaR, Basel III calculations
+- **API Gateway** - Authentication, routing, rate limiting
+- **Risk Service** - Credit risk, VaR, Basel III calculations  
 - **AML Service** - Transaction monitoring, sanctions screening
 - **Compliance Service** - Regulatory reporting, audit trails
 - **Security Service** - IAM, access control, security events
-- **Notification Service** - Alerts, emails, SMS
 
 ### Infrastructure
-- **Kafka** - Event streaming and messaging
-- **PostgreSQL** - Primary database with TimescaleDB
+- **PostgreSQL** - Primary database (optimized for containers)
 - **Redis** - Caching and session storage
-- **Elasticsearch** - Search and analytics
-- **Keycloak** - Identity and access management
-- **Vault** - Secrets management
+- **Redpanda** - Kafka-compatible streaming (single node)
+- **OpenSearch** - Search and analytics (single node)
+- **Keycloak** - Identity and access management (dev mode)
+- **OPA** - Policy engine for authorization
 
 ### Frontend
 - **React 18** with TypeScript
@@ -90,61 +131,132 @@ npm start
 - **React Query** for data fetching
 - **React Router** for navigation
 
-## 📈 MVP Features
+## 📈 Development Workflow
 
-### ✅ Implemented
-- [x] Microservices architecture
-- [x] Docker containerization
-- [x] Database schema and migrations
-- [x] Risk calculation service
-- [x] Basic React frontend
-- [x] API Gateway routing
-- [x] Monitoring with Prometheus/Grafana
-- [x] Message streaming with Kafka
-
-### 🚧 In Development
-- [ ] AML transaction monitoring rules
-- [ ] Compliance reporting engine
-- [ ] Security policy management
-- [ ] ML model integration
-- [ ] Real-time dashboards
-- [ ] Authentication integration
-
-### 📋 Roadmap
-- [ ] Advanced ML fraud detection
-- [ ] Real-time sanctions screening
-- [ ] Automated regulatory reports
-- [ ] Mobile application
-- [ ] API marketplace
-- [ ] Multi-tenant architecture
-
-## 🛠️ Development
-
-### Adding New Features
-1. Create feature branch: `git checkout -b feature/new-feature`
-2. Implement backend service changes
-3. Update frontend components
-4. Add tests
-5. Update documentation
-6. Create pull request
-
-### Running Tests
+### Daily Development
 ```bash
-# Backend tests
-cd backend
-./gradlew test
+# Start minimal stack
+make up
 
-# Frontend tests
-cd frontend
-npm test
+# Work on your features...
+
+# View logs
+make logs
+
+# Stop when done
+make down
 ```
 
-### Database Migrations
+### AML/Streaming Development
 ```bash
-# Create new migration
-cd backend/services/sentinel-risk
-./gradlew flywayMigrate
+# Start core + streaming
+make dev
+# OR: make up && make stream
+
+# Test message processing
+# Kafka UI available at http://localhost:8083
 ```
+
+### Full Stack Testing
+```bash
+# Start everything (rarely needed)
+make all
+
+# Monitor resources
+make stats
+
+# Stop when done
+make clean
+```
+
+## 🛠️ Development Commands
+
+### Service Management
+```bash
+make up          # Start core services
+make down        # Stop all services  
+make restart     # Restart running services
+make clean       # Stop and remove volumes
+make build       # Build application images
+```
+
+### Monitoring & Debugging
+```bash
+make status      # Show service status
+make health      # Check service health
+make logs        # Show all logs
+make stats       # Show resource usage
+make urls        # List all service URLs
+```
+
+### Database Operations
+```bash
+make db-shell    # Connect to PostgreSQL
+make db-reset    # Reset database (destroys data!)
+```
+
+### Individual Service Logs
+```bash
+make backend-logs   # API Gateway logs
+make frontend-logs  # React app logs
+make db-logs       # Database logs
+```
+
+## 🧪 Testing External APIs
+
+### Sandbox Mode
+```bash
+# Start sandbox services
+make sandbox
+
+# Test sanctions screening
+curl -X POST http://localhost:8089/sanctions/screen \
+  -H "Content-Type: application/json" \
+  -d '{"name": "John Doe", "country": "US"}'
+
+# Test KYC verification  
+curl -X POST http://localhost:8089/kyc/verify \
+  -H "Content-Type: application/json" \
+  -d '{"customerId": "12345", "documentType": "PASSPORT"}'
+
+# Test PEP screening
+curl "http://localhost:8089/pep/search?name=politician"
+```
+
+## 📊 Resource Management
+
+### Memory Usage by Profile
+- **Core**: ~2GB (API + UI + DB + Auth)
+- **+ Stream**: +512MB (Redpanda)
+- **+ Search**: +512MB (OpenSearch)  
+- **+ Workflow**: +512MB (Zeebe)
+- **+ Monitoring**: +256MB (Prometheus/Grafana)
+- **+ Sandbox**: +128MB (WireMock)
+
+### Optimization Tips
+- Start with `core` profile only
+- Add profiles as needed for specific work
+- Use `make clean` to free resources
+- Monitor with `make stats`
+
+## 🔐 Security Configuration
+
+### Default Credentials
+- **Keycloak Admin**: admin/admin123
+- **Grafana**: admin/admin123  
+- **Database**: sentinel/sentinel
+
+### JWT Configuration
+- **Issuer**: http://localhost:8081/realms/baheka-sentinel
+- **Algorithms**: RS256
+- **Token expiry**: 15 minutes (configurable)
+
+### Role-Based Access
+- **admin**: Full access to all APIs
+- **risk_manager**: Risk service access
+- **aml_analyst**: AML service access
+- **compliance_officer**: Compliance service access
+- **viewer**: Read-only access
 
 ## 🔧 Configuration
 
@@ -153,11 +265,11 @@ cd backend/services/sentinel-risk
 # Database
 DB_HOST=localhost
 DB_PORT=5432
-DB_NAME=baheka_sentinel
-DB_USER=baheka_user
-DB_PASSWORD=baheka_password
+DB_NAME=sentinel
+DB_USER=sentinel
+DB_PASSWORD=sentinel
 
-# Kafka
+# Kafka (when using stream profile)
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 
 # Redis
@@ -165,35 +277,35 @@ REDIS_HOST=localhost
 REDIS_PORT=6379
 
 # Keycloak
-KEYCLOAK_URL=http://localhost:8080/auth
+KEYCLOAK_URL=http://localhost:8081
 KEYCLOAK_REALM=baheka-sentinel
 ```
 
 ## 📞 Support
 
-- Documentation: `docs/`
-- API Documentation: http://localhost:8080/swagger-ui.html
-- Issues: GitHub Issues
-- Email: support@baheka.com
-
-## 🚀 Deployment
-
-### Production Deployment
-1. Configure environment variables
-2. Build Docker images
-3. Deploy to Kubernetes
-4. Set up monitoring and alerting
-5. Configure backup and recovery
-
-### Kubernetes Deployment
+### Health Checks
 ```bash
-# Apply Kubernetes manifests
-kubectl apply -f k8s/
+# Overall health
+make health
 
-# Check deployment status
-kubectl get pods -n baheka-sentinel
+# Individual service health
+curl http://localhost:8080/actuator/health  # API
+curl http://localhost:3000                  # Frontend  
+curl http://localhost:8081/health/ready     # Keycloak
 ```
+
+### Common Issues
+1. **Port conflicts**: Check if ports 3000, 8080, 8081 are available
+2. **Memory issues**: Reduce profiles or increase Docker memory limit
+3. **Database connection**: Ensure PostgreSQL is healthy (`make health`)
+4. **Authentication**: Check Keycloak is running on port 8081
+
+### Getting Help
+- **Logs**: `make logs` for all services
+- **Status**: `make status` for service overview
+- **Documentation**: Available in `docs/` directory
+- **API Docs**: http://localhost:8080/swagger-ui.html
 
 ---
 
-**Baheka Sentinel** - Empowering financial institutions with comprehensive risk, compliance, and security management.
+**Baheka Sentinel** - Start lightweight, scale as needed!
